@@ -44,11 +44,26 @@ UML Class diagram
 
 ![History Archive Reader Class Diagram](images/historyarchive.png)
 
-#### Ledger Transaction-Set Reader
+Example of reading a history archive using `stellar-core`:
 
-The ingestion system needs a way to keep the current ledger state up to date, as well as a way to construct a history of events (typically transactions, operations, and effects) that have occurred over time on the Stellar network. The ledger transaction-set reader provides this ability. Specifically, it allows the ingestion system to access a stream of transaction metadata and [results](https://github.com/stellar/stellar-core/blob/master/src/transactions/readme.md#result-1) that encode state changes that happen as a result of every transaction. This information is missing from the history archives, and is also updated after every ledger close (vs. after every 64 in the history archives).
+```sh
+wget http://history.stellar.org/prd/core-live/core_live_001/results/01/4d/f7/results-014df7ff.xdr.gz
+gunzip results-014df7ff.xdr.gz
+~/src/stellar-core/src/stellar-core dump-xdr results-014df7ff.xdr | head -n 40
+```
 
-The long term plan is for `stellar-core` to write transaction metadata out to an S3 bucket, which will allow the following:
+#### Full Ledger Reader
+
+The ingestion system needs a way to keep the current ledger state up to date, as well as a way to construct a history of events (typically transactions, operations, and effects) that have occurred over time on the Stellar network. The full ledger reader provides this ability. Specifically, it allows the ingestion system to access a stream of transaction metadata that encode state changes that happen as a result of every transaction. This information is missing from the history archives, and is also updated after every ledger close (vs. after every 64 in the history archives). The full ledger reader also has access to transaction sets for each ledger.
+
+Here's a summary of the unique features provided by the full ledger reader vs. the history archive reader:
+
+| Reader | ledger state snapshots | transaction metadata | near-realtime (updates at every ledger close) |
+| --- | --- | --- | ---|
+| history archive | X | | |
+| full ledger | | X | X |
+
+The long term plan for the full ledger reader is for `stellar-core` to write transaction metadata out to an S3 bucket, which will allow the following:
 
 1. Reading transaction metadata without creating load on `stellar-core`'s database
 2. Fast, parallel access to historical transaction metadata (allowing fast `CATCHUP_COMPLETE` ingestion)
@@ -56,7 +71,7 @@ The long term plan is for `stellar-core` to write transaction metadata out to an
 
 However, this requires a change to `stellar-core`, which is estimated to happen in Q3 2019. Until then, the ingestion system will read from the `txfeehistory` and `txhistory` tables in the `stellar-core` database as it does currently. Unfortunately, we won't get any of the benefits listed above until the change is made to `stellar-core`.
 
-The ledger transaction-set reader will support multiple backends:
+The full ledger reader will support multiple backends:
 
 1. `stellar-core` database reader (this will be implemented first, and is exactly what happens now)
 2. File backend
