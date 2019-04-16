@@ -79,7 +79,7 @@ The full ledger reader will support multiple backends:
 
 UML Class diagram
 
-![Ledger Transaction-Set Reader Class Diagram](images/ledgerbackend.png)
+![Full Ledger Reader Class Diagram](images/ledgerbackend.png)
 
 ### Data Transformation
 
@@ -123,17 +123,17 @@ Notes:
 
 ### Outputs
 
-Once ledger and state data have been filtered, they must be passed on to one or more `Sink`s that receive the data and take action on it.
+Once ledger and state data have been filtered, they must be passed on to one or more `Process` objects that receive the data and take action on it in a particular `ProcessingPipeline`. There can also be multiple `ProcessingPipeline`s, one for each sink.
 
-Examples of sinks:
+Examples of sinks / stores:
 
 - An in-memory store that stores current order book information
 - A postgres store for a wallet app that updates the app's `users` table any time a user's balance changes
 - A streaming service that sends websockets notifications whenever the price for a particular asset changes
 
-Unfortunately, stores are not particularly reuseable, because they have a particular storage schema baked-in in order to know how to write out updates. This is why the stores in the diagram below have names like `MyPostgresStore` rather than `PostgresStore`. However, stores are extensible, because a developer can create and add a new store to their app's `ProcessingPipeline` that writes to the same underlying storage (say a postgres database) and adds new tables or fields.
+Unfortunately, stores and `Process` objects are not reuseable, because they have a particular storage schema baked-in in order to know how to write out updates. This is why the `Store`s in the diagram below have names like `MyPostgresStore` rather than `PostgresStore`. However, `Store`s are extensible, because a developer can create and add a new store or `Process` to their app that writes to the same underlying storage (say a postgres database) and adds new tables or fields.
 
-There's also a significant challenge keeping stores in sync. If multiple `Sink`s write to the same underlying store, or to entirely different stores, then any read operation that reads across stores or across data updated by multiple `Sink`s is at risk of reading inconsistent values.
+There's also a significant challenge keeping stores in sync. If multiple `Process`es write to the same underlying store, or to entirely different stores, then any read operation that reads across stores or across data updated by multiple `Processes`s is at risk of reading inconsistent values.
 
 See the UML diagram:
 
@@ -143,6 +143,8 @@ Notes:
 
 - `MyMemoryStateStore` is an example of the kind of in-memory store we'd want to implement for Horizon.
 - `AccountNotificationProcess` is an example of processor that notifies users when their account has changed
+- There's an alternate way to design this package, where there is a single `ProcessingPipeline` and no `Store` objects. Instead, each `Process` object is initialized with access to its underlying store independently. This decouples `Store`s from `ProcessingPipeline`s. It may also remove the need for `Store` objects altogether. A `Process` could directly write to postgres, and a `Process` could write directly to an in-memory `State` object.
+- I'd rename `Process` to `Processor` or even `Writer`
 
 ### Tying it all together
 
@@ -156,20 +158,46 @@ The ingestion system can run as a stand-alone process or as part of a larger pro
 
 ## Open questions
 
-There are many open questions, and the design above could be much more detailed. A few questions below:
+There are many open questions, and the design above is very high-level. A few questions below:
 
-- What is the story around ingestion plugins? How do developers use and customize it?
+- What is the story around ingestion plugins? How do developers use the ingestion system in their own projects?
+- How do we enable ingestion via multiple languages?
 - Will we split Horizon into an ingestion process and an API server process, or keep a single process?
 - Should a stand-alone ingestion process expose an RPC server or a more standard REST API?
+  - What's the exact API that an ingestion server exposes?
 - Where is parallel ingestion logic handled?
+- How exactly do we organize `Store`s, `ProcessingPipeline`, and `Process`es?
+- How do we keep reads from multiple stores consistent?
+- How do we make the `Store`s and `Process`es in `ingest/stores` reusable?
 
-## Horizon with new ingestion
+## Implementation Plan
 
 This gives a high-level overview of how we could move Horizon over to using the new ingestion system.
+
+### As we implement components
+
+We can create a command-line tool that computes basic stats and exercises all the components of ingestion to prove that they work together. For example, the tool can compute the total number of accounts every 5 minutes, or compute the number of transactions per second.
 
 ### The proof of concept
 
 We can implement [accounts for signer](https://github.com/stellar/go/issues/432) using the new ingestion system. It's a good candidate because it's something we urgently need, and it's a new feature, so we don't risk breaking anything existing if there's an issue with the system.
 
+### Chunks that can be broken off and implemented separately
+
+- The projects below depend on the `io` package interfaces, which should be pretty minimal to add.
+- History Archive Backend and History Archive Adapter (Nikhil is already on this)
+  - command-line tool takes a history archive file and prints out basic stats like # of accounts and transactions per second 
+- `DatabaseBackend` implementation of `LedgerBackend` and `LedgerBackendAdapter`
+  - command-line tool takes a database URI and computes stats like # of transactions in the latest ledger (it runs live and updates with each new ledger in the `DatabaseBackend`)
+- `ingest/filters`:
+  - command-line tool that implements a few demo filters and given a DB URL and/or a historyarchive file location, streams out the data that passes the filter
+- `ingest/stores`: Implement a basic postgres store for accounts, to be used to implement `accounts for signer`
+  - command-line tool that runs the basic ingestion from input to the store
+
+Once the above are all done, put together a basic ingestion server as laid out in the top-level `ingest` package.
+
+At this point, we'll have a full end-to-end implementation! Next, we start filling in the extra features we didn't need for the proof of concept. Once it's reasonably stable, we can release Horizon with the new `accoutns for signer` feature to get some real-world testing.
+
 ### Porting the rest of Horizon over
 
+Once the proof of concept is functional, tables / features can be ported over one by one. Features that depend on `stellar-core` tables currently can be moved to equivalent tables maintained by Horizon. I imagine most features will still use postgres, but a few, such as pathfinding, will need in-memory storage for speed. If pathfinding can maintain a copy of order books [in memory](https://github.com/stellar/go/issues/849) it should run orders of magnitude faster. Horizon should be split out into a microservices architecture, with each feature implemented using a different `StateInitProcess` or `LedgerProcess` object.
