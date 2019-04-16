@@ -158,7 +158,7 @@ The ingestion system can run as a stand-alone process or as part of a larger pro
 
 ## Open questions
 
-There are many open questions, and the design above is very high-level. A few questions below:
+There are several open questions, and the design above isn't comprehensive. A few questions below:
 
 - What is the story around ingestion plugins? How do developers use the ingestion system in their own projects?
 - How do we enable ingestion via multiple languages?
@@ -172,7 +172,7 @@ There are many open questions, and the design above is very high-level. A few qu
 
 ## Implementation Plan
 
-This gives a high-level overview of how we could move Horizon over to using the new ingestion system.
+This gives an overview of how we could move Horizon over to using the new ingestion system.
 
 ### As we implement components
 
