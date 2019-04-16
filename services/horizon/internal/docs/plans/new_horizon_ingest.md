@@ -56,12 +56,12 @@ gunzip results-014df7ff.xdr.gz
 
 The ingestion system needs a way to keep the current ledger state up to date, as well as a way to construct a history of events (typically transactions, operations, and effects) that have occurred over time on the Stellar network. The full ledger reader provides this ability. Specifically, it allows the ingestion system to access a stream of transaction metadata that encode state changes that happen as a result of every transaction. This information is missing from the history archives, and is also updated after every ledger close (vs. after every 64 in the history archives). The full ledger reader also has access to transaction sets for each ledger.
 
-Here's a summary of the unique features provided by the full ledger reader vs. the history archive reader:
+Here's a summary of the features provided by the full ledger reader vs. the history archive reader:
 
-| Reader | ledger state snapshots | transaction metadata | near-realtime (updates at every ledger close) |
-| --- | --- | --- | ---|
-| history archive | X | | |
-| full ledger | | X | X |
+| Reader | txn resultsets | ledger state snapshots | transaction metadata | near-realtime (updates at every ledger close) |
+| --- |:---:|:---:|:---:|:---:|
+| history archive | X | X | | |
+| full ledger | X | | | X | X |
 
 The long term plan for the full ledger reader is for `stellar-core` to write transaction metadata out to an S3 bucket, which will allow the following:
 
@@ -80,3 +80,96 @@ The full ledger reader will support multiple backends:
 UML Class diagram
 
 ![Ledger Transaction-Set Reader Class Diagram](images/ledgerbackend.png)
+
+### Data Transformation
+
+The ingestion system has a data transformation pipeline in between its inputs (full ledger backend + history archive backend), and its outputs.
+
+#### Input Adapters
+
+The first step is to adapt the format of the data flowing from the two input backends into a format & interface that is easy for the ingestion system to use for both random access, and accessing the latest data.
+
+UML Class diagram
+
+![Input Adapters Class Diagram](images/adapters.png)
+
+Notes:
+
+- the `HistoryArchiveAdapter` supports both reading a ledger transaction result set via `GetLedger()` and reading ledger state via `GetState()`.
+- Both adapters support `GetLatestLedgerSequence()`, which allows a consumer to look up the most recent ledger information in the backend.
+- Rather than returning state and ledgers as objects stored in memory, they are returned as reader objects. This is because the ledger state or a particular transaction state may not fit in memory, and must be processed as a stream.
+
+You can see more details about the `io` package containing the `Reader` structs in this diagram:
+
+![IO package](images/io.png)
+
+#### Ingestion Filters
+
+At the center of ingestion is a filtering `Pipeline`, which is initialized with a series of filters for each kind of data that ingestion handles (ledger state, a full ledger update, and an archive ledger update). Each filter implements a function that reads data from a `Reader`, transforms it, and writes it to a `Writer`. A few example filters:
+
+- A filter that passes on only information about a certain account
+- A filter that only looks at certain kinds of events, such as offers being placed
+
+See the rough UML diagram:
+
+![Filter package](images/filters.png)
+
+Notes:
+
+- The filters are applied in the order they're added to the `Pipeline`.
+- There probably should be a separate AddFilter method for each kind of filter
+- Filtering does not change the type of the data, but it can remove or change fields in the data
+- Filter should probably be called `Transformer` instead, since it does not change the number of data objects, only the the fields inside the data objects.
+
+### Outputs
+
+Once ledger and state data have been filtered, they must be passed on to one or more `Sink`s that receive the data and take action on it.
+
+Examples of sinks:
+
+- An in-memory store that stores current order book information
+- A postgres store for a wallet app that updates the app's `users` table any time a user's balance changes
+- A streaming service that sends websockets notifications whenever the price for a particular asset changes
+
+Unfortunately, stores are not particularly reuseable, because they have a particular storage schema baked-in in order to know how to write out updates. This is why the stores in the diagram below have names like `MyPostgresStore` rather than `PostgresStore`. However, stores are extensible, because a developer can create and add a new store to their app's `ProcessingPipeline` that writes to the same underlying storage (say a postgres database) and adds new tables or fields.
+
+There's also a significant challenge keeping stores in sync. If multiple `Sink`s write to the same underlying store, or to entirely different stores, then any read operation that reads across stores or across data updated by multiple `Sink`s is at risk of reading inconsistent values.
+
+See the UML diagram:
+
+![Store package](images/stores.png)
+
+Notes:
+
+- `MyMemoryStateStore` is an example of the kind of in-memory store we'd want to implement for Horizon.
+- `AccountNotificationProcess` is an example of processor that notifies users when their account has changed
+
+### Tying it all together
+
+The ingestion system can run as a stand-alone process or as part of a larger process like Horizon. It can handle three different kinds of sessions:
+
+- `IngestRangeSession`: ingest data over a range of ledgers. Used for ingesting historical data in parallel
+- `LiveSession`: ingest the latest ledgers as soon as the close. This is the standard operating mode for a live Horizon instance
+- `CheckpointsOnlySession`: ingest only history archive checkpoint data.
+
+![ingest package](images/system.png)
+
+## Open questions
+
+There are many open questions, and the design above could be much more detailed. A few questions below:
+
+- What is the story around ingestion plugins? How do developers use and customize it?
+- Will we split Horizon into an ingestion process and an API server process, or keep a single process?
+- Should a stand-alone ingestion process expose an RPC server or a more standard REST API?
+- Where is parallel ingestion logic handled?
+
+## Horizon with new ingestion
+
+This gives a high-level overview of how we could move Horizon over to using the new ingestion system.
+
+### The proof of concept
+
+We can implement [accounts for signer](https://github.com/stellar/go/issues/432) using the new ingestion system. It's a good candidate because it's something we urgently need, and it's a new feature, so we don't risk breaking anything existing if there's an issue with the system.
+
+### Porting the rest of Horizon over
+
